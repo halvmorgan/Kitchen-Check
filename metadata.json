@@ -1,0 +1,6 @@
+{
+  "name": "How Dated Is Your Kitchen, Really? | Free Room Check",
+  "description": "Instant automated design check for kitchen and bathroom remodeling leads. Analyze style era, layout efficiency, finish wear, and modern scores.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
