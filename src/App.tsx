@@ -115,7 +115,7 @@ export default function App() {
   const [bathMode] = useState<boolean>(() => {
     try {
       const q = new URLSearchParams(window.location.search).get('room');
-      return q === 'bath' || /bath/i.test(window.location.hostname);
+      return q === 'bath' || /bath/i.test(window.location.hostname) || /^\/bath(\/|$)/i.test(window.location.pathname);
     } catch {
       return false;
     }
