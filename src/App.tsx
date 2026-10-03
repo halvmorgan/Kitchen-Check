@@ -121,6 +121,13 @@ export default function App() {
     }
   });
 
+  // Browser tab title follows bathroom mode
+  useEffect(() => {
+    if (bathMode) {
+      document.title = document.title.replace(/Kitchen/g, 'Bathroom');
+    }
+  }, [bathMode]);
+
   // Free demo gate: one free room check per remodeler; owner passcode = unlimited
   const kcTokenRef = useRef<string | null>(null);
   if (kcTokenRef.current === null) {
