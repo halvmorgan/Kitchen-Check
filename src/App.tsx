@@ -26,6 +26,38 @@ import { processImageFile, processImageUrl } from './utils/imageProcessor';
 
 export const ECENTRA_BOOKING_URL = 'https://api.leadconnectorhq.com/widget/booking/LVpOsNeO7yzeOGttipmW';
 
+
+// ---- Remodeler offers: split test (force one with ?offer=a or ?offer=b) ----
+type KcOffer = 'a' | 'b';
+const KC_STRIPE: Record<KcOffer, string> = {
+  a: 'https://buy.stripe.com/dRmfZi85r3UV5sF6le3VC0w',
+  b: '',
+};
+const KC_PRICE: Record<KcOffer, { setup: string; monthly: string }> = {
+  a: { setup: '$497 setup', monthly: '+ $297/month' },
+  b: { setup: '$497 setup', monthly: '+ $97/month' },
+};
+const KC_INCLUDES = [
+  'Your own Kitchen Check with your name, logo, colors and service area',
+  'Your real kitchen and bath price ranges in every estimate',
+  'A "How dated is your kitchen?" button and page for your website',
+  'Every homeowner who uses it comes to you as a lead: name, phone, email and their room report',
+  'QR code flyer for yard signs, trucks, your showroom and home shows',
+  '3 ready-to-post social media captions',
+  'Set up within 7 days of a 20-minute setup call',
+];
+// Counts visits, room checks and buy clicks per offer (results show in Harold's owner panel).
+const KC_TRACK_URL = 'https://see-it-finished-1087409700169.us-east1.run.app/api/kc-track';
+const kcTrack = (offer: KcOffer, event: 'view' | 'demo' | 'checkout') => {
+  try {
+    const body = JSON.stringify({ offer, event });
+    if (navigator.sendBeacon) navigator.sendBeacon(KC_TRACK_URL, new Blob([body], { type: 'text/plain' }));
+    else fetch(KC_TRACK_URL, { method: 'POST', body, mode: 'no-cors', keepalive: true }).catch(() => {});
+  } catch {
+    /* tracking must never break the page */
+  }
+};
+
 const SAMPLE_ROOMS: SampleRoom[] = [
   {
     id: 'sample-oak-kitchen',
@@ -56,6 +88,34 @@ const ANALYZING_MESSAGES = [
 
 export default function App() {
   const [screen, setScreen] = useState<ScreenState>('hero');
+  const [kcOffer] = useState<KcOffer>(() => {
+    const pick = (): KcOffer => (Math.random() < 0.5 ? 'a' : 'b');
+    try {
+      const q = new URLSearchParams(window.location.search).get('offer');
+      if (q === 'a' || q === 'b') {
+        localStorage.setItem('kc_offer', q);
+        return q;
+      }
+      const saved = localStorage.getItem('kc_offer');
+      if (saved === 'a' || saved === 'b') return saved;
+      const p = pick();
+      localStorage.setItem('kc_offer', p);
+      return p;
+    } catch {
+      return pick();
+    }
+  });
+  useEffect(() => {
+    kcTrack(kcOffer, 'view');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const goToOffer = () => document.getElementById('kc-offer')?.scrollIntoView({ behavior: 'smooth' });
+  const handleKcCheckout = () => {
+    kcTrack(kcOffer, 'checkout');
+    const link = KC_STRIPE[kcOffer];
+    if (link) window.location.href = link;
+    else window.open(ECENTRA_BOOKING_URL, '_blank', 'noopener');
+  };
   const [uploadedPhotoUrl, setUploadedPhotoUrl] = useState<string | null>(null);
   const [analysisResult, setAnalysisResult] = useState<RoomAnalysisResult | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -68,6 +128,8 @@ export default function App() {
   const [leadPhone, setLeadPhone] = useState('');
   const [leadEmail, setLeadEmail] = useState('');
   const [formErrors, setFormErrors] = useState<{ name?: string; phone?: string; email?: string }>({});
+  const [leadSending, setLeadSending] = useState(false);
+  const leadSendingRef = useRef(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -139,6 +201,7 @@ export default function App() {
 
       setAnalysisResult(data);
       setScreen('report');
+      kcTrack(kcOffer, 'demo');
     } catch (err: unknown) {
       const msg =
         err instanceof Error && err.name === 'AbortError'
@@ -194,7 +257,7 @@ export default function App() {
     setHiddenSamples((prev) => new Set(prev).add(sampleId));
   };
 
-  const handleLeadSubmit = () => {
+  const handleLeadSubmit = async () => {
     const errors: { name?: string; phone?: string; email?: string } = {};
 
     if (!leadName.trim()) {
@@ -214,7 +277,42 @@ export default function App() {
     setFormErrors(errors);
 
     if (Object.keys(errors).length === 0) {
-      // Form submitted successfully, transition to Booked screen
+      // Send the request to the business (GoHighLevel via /api/lead), then show the Booked screen
+      if (leadSendingRef.current) return;
+      leadSendingRef.current = true;
+      setLeadSending(true);
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 10000);
+      try {
+        await fetch('/api/lead', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
+          body: JSON.stringify({
+            name: leadName.trim(),
+            phone: leadPhone.trim(),
+            email: leadEmail.trim(),
+            page: window.location.href,
+            report: analysisResult
+              ? {
+                  score: analysisResult.score,
+                  roomType: analysisResult.roomType,
+                  styleEra: analysisResult.styleEra,
+                  verdict: analysisResult.verdict,
+                  costRange: analysisResult.costRange,
+                  costNote: analysisResult.costNote,
+                  bottomLine: analysisResult.bottomLine,
+                }
+              : null,
+          }),
+        });
+      } catch (err) {
+        console.warn('Lead could not be sent', err);
+      } finally {
+        clearTimeout(timer);
+        leadSendingRef.current = false;
+        setLeadSending(false);
+      }
       setScreen('booked');
     }
   };
@@ -288,14 +386,13 @@ export default function App() {
               This tool was built for <strong className="text-white font-semibold">YOUR remodeling company</strong>. Your name, your branding, your calendar.
             </span>
           </div>
-          <a
-            href={ECENTRA_BOOKING_URL}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="hidden md:inline-flex items-center gap-1.5 text-xs text-[#E59866] hover:text-white transition-colors shrink-0 underline decoration-[#B8683D]/60 underline-offset-4"
+          <button
+            type="button"
+            onClick={goToOffer}
+            className="cursor-pointer inline-flex items-center gap-1.5 text-xs text-[#E59866] hover:text-white transition-colors shrink-0 underline decoration-[#B8683D]/60 underline-offset-4"
           >
-            Claim This For Your Site <ArrowRight className="w-3.5 h-3.5" />
-          </a>
+            Get it on your website <ArrowRight className="w-3.5 h-3.5" />
+          </button>
         </div>
       </div>
 
@@ -840,9 +937,10 @@ export default function App() {
                 <button
                   type="button"
                   onClick={handleLeadSubmit}
+                  disabled={leadSending}
                   className="w-full cursor-pointer bg-[#B8683D] hover:bg-[#A3582E] text-white font-medium py-4 px-6 rounded-xl shadow-md hover:shadow-lg transition-all duration-200 text-base sm:text-lg flex items-center justify-center gap-2 font-semibold"
                 >
-                  <span>Book My Free Design Consultation</span>
+                  <span>{leadSending ? 'Sending...' : 'Book My Free Design Consultation'}</span>
                   <ArrowRight className="w-5 h-5" />
                 </button>
               </div>
@@ -879,19 +977,26 @@ export default function App() {
             </h2>
 
             <p className="text-base text-[#5E564E] leading-relaxed mb-8 max-w-xl mx-auto">
-              Want this activated for your business? Book a 15-minute setup call with Ecentra Concierge below — we'll set it up on your site, branded to your business.
+              Want this on your website, branded to your business? Founding price: {KC_PRICE[kcOffer].setup} {KC_PRICE[kcOffer].monthly}, for the first 5 remodelers.
             </p>
 
             {/* Large Book Setup Call Button */}
             <div className="max-w-md mx-auto mb-6">
+              <button
+                type="button"
+                onClick={handleKcCheckout}
+                className="cursor-pointer w-full inline-flex items-center justify-center gap-3 bg-[#B8683D] hover:bg-[#A3582E] text-white font-semibold py-4 px-6 rounded-xl shadow-lg hover:shadow-xl transition-all duration-200 text-base sm:text-lg group"
+              >
+                <span>Claim a founding spot</span>
+                <ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
+              </button>
               <a
                 href={ECENTRA_BOOKING_URL}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="w-full inline-flex items-center justify-center gap-3 bg-[#B8683D] hover:bg-[#A3582E] text-white font-semibold py-4 px-6 rounded-xl shadow-lg hover:shadow-xl transition-all duration-200 text-base sm:text-lg group"
+                className="mt-3 inline-block text-sm font-medium text-[#B8683D] hover:underline"
               >
-                <span>Book Your Setup Call</span>
-                <ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
+                Questions first? Book a 15-minute call
               </a>
             </div>
 
@@ -913,6 +1018,47 @@ export default function App() {
           </div>
         )}
       </main>
+
+      {/* Remodeler offer (split test A/B) */}
+      <section id="kc-offer" className="bg-[#181513] text-[#FAF8F5]">
+        <div className="max-w-3xl mx-auto px-4 sm:px-6 py-12">
+          <p className="text-[#E59866] text-xs font-semibold uppercase tracking-wider">For kitchen and bath remodelers · Founding offer</p>
+          <h2 className="mt-2 text-2xl sm:text-3xl font-display font-bold leading-tight">
+            Put Kitchen Check on your website and turn visitors into in-home design consults.
+          </h2>
+          <p className="mt-3 text-[#C8C2BA]">
+            Homeowners upload a photo of their kitchen or bathroom, get an instant read on how dated it looks with your price ranges, then ask you for a consult. Done for you, with your name on it.
+          </p>
+          <div className="mt-6 rounded-2xl bg-[#FAF8F5] text-[#24211E] p-6 sm:p-8">
+            <div className="flex flex-wrap items-baseline gap-x-3">
+              <span className="text-4xl font-bold">{KC_PRICE[kcOffer].setup}</span>
+              <span className="text-lg font-semibold text-[#5E564E]">{KC_PRICE[kcOffer].monthly}</span>
+            </div>
+            <p className="mt-1 text-sm text-[#857B72]">Founding price for the first 5 remodelers (normally $997 setup). Cancel the monthly anytime.</p>
+            <ul className="mt-5 space-y-2">
+              {KC_INCLUDES.map((x, i) => (
+                <li key={i} className="flex gap-2 text-sm sm:text-base">
+                  <CheckCircle2 className="w-5 h-5 text-[#B8683D] shrink-0" />
+                  <span>{x}</span>
+                </li>
+              ))}
+            </ul>
+            <button
+              type="button"
+              onClick={handleKcCheckout}
+              className="cursor-pointer mt-6 w-full rounded-xl bg-[#B8683D] hover:bg-[#A3582E] py-4 text-lg font-bold text-white"
+            >
+              Claim a founding spot
+            </button>
+            <p className="mt-3 text-center text-sm">
+              <a href={ECENTRA_BOOKING_URL} target="_blank" rel="noopener noreferrer" className="text-[#B8683D] font-medium hover:underline">
+                Questions first? Book a 15-minute call
+              </a>
+            </p>
+            <p className="mt-2 text-center text-xs text-[#877E75]">Secure checkout by Stripe. Estimates shown to homeowners are ballparks, not quotes.</p>
+          </div>
+        </div>
+      </section>
 
       {/* Footer */}
       <footer className="border-t border-[#EDE6DC] bg-white py-6 px-4 text-center text-xs text-[#8F857B]">

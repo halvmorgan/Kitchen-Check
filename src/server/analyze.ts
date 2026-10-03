@@ -173,3 +173,117 @@ export async function analyzeRoom(base64Data: string, mimeType = 'image/jpeg'): 
 
   throw new Error(lastError?.message || "Room analysis failed. Please try again with another photo.");
 }
+
+
+// ---------------------------------------------------------------------------
+// Lead delivery: send each consult request to GoHighLevel.
+// Secrets (AI Studio > Secrets): GHL_PRIVATE_TOKEN (required), GHL_LOCATION_ID (optional),
+// LEAD_TAG (optional). For a paying client's copy, use THEIR token and location ID.
+// ---------------------------------------------------------------------------
+const GHL_API = 'https://services.leadconnectorhq.com';
+const GHL_DEFAULT_LOCATION = '8wtMUEAdUnx0Y7nVe93R'; // Ecentra Concierge
+const leadHits = new Map<string, number[]>();
+
+function clip(v: unknown, max: number): string {
+  return String(v ?? '').replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, max);
+}
+
+async function ghl(pathname: string, token: string, body: unknown): Promise<any> {
+  const r = await fetch(GHL_API + pathname, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Version: '2021-07-28',
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  const text = await r.text();
+  let data: any = null;
+  try { data = text ? JSON.parse(text) : null; } catch { data = null; }
+  if (!r.ok) throw new Error(`GHL ${pathname} ${r.status}: ${text.slice(0, 300)}`);
+  return data;
+}
+
+export async function deliverLead(body: any, ip: string): Promise<Record<string, unknown>> {
+  try {
+    const now = Date.now();
+    const hits = (leadHits.get(ip) || []).filter((t) => now - t < 10 * 60 * 1000);
+    if (hits.length >= 8) return { ok: false, error: 'Too many requests. Please try again later.' };
+    hits.push(now);
+    leadHits.set(ip, hits);
+
+    const b = body || {};
+    if (b.website) return { ok: true }; // honeypot
+    const name = clip(b.name, 100);
+    const phone = clip(b.phone, 30);
+    const email = clip(b.email, 120);
+    if (!name || phone.replace(/\D/g, '').length < 10 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return { ok: false, error: 'Please check your name, phone and email.' };
+    }
+    const r = b.report || {};
+    const note = [
+      'Kitchen Check request',
+      `Room: ${clip(r.roomType, 60)} | Style: ${clip(r.styleEra, 80)}`,
+      `Modern Score: ${clip(r.score, 5)}/100 (${clip(r.verdict, 60)})`,
+      `Price ballpark: ${clip(r.costRange, 60)} ${clip(r.costNote, 120)}`,
+      `Bottom line: ${clip(r.bottomLine, 400)}`,
+      `Page: ${clip(b.page, 200)}`,
+      'Consent: agreed to be contacted by phone, text or email.',
+    ].join('\n');
+
+    const token = process.env.GHL_PRIVATE_TOKEN;
+    if (!token) {
+      console.warn('[lead] GHL_PRIVATE_TOKEN not set; lead not delivered:', name, email);
+      return { ok: true, delivered: false, reason: 'not configured' };
+    }
+    const parts = name.split(/\s+/);
+    const up = await ghl('/contacts/upsert', token, {
+      locationId: process.env.GHL_LOCATION_ID || GHL_DEFAULT_LOCATION,
+      name,
+      firstName: parts[0],
+      lastName: parts.slice(1).join(' ') || undefined,
+      email,
+      phone,
+      source: 'Kitchen Check',
+      tags: [process.env.LEAD_TAG || 'kitchen check demo'],
+    });
+    const contactId = up?.contact?.id;
+    if (contactId) {
+      try { await ghl(`/contacts/${contactId}/notes`, token, { body: note }); } catch (e) { console.warn('[lead] note failed', e); }
+    }
+    return { ok: true, delivered: Boolean(contactId) };
+  } catch (err) {
+    console.error('[lead] failed', err);
+    return { ok: false, error: 'Could not send right now.' };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Founding-price counter for ecentraconcierge.com/kitchen-check.
+// Secret: STRIPE_READ_KEY (restricted key, Payment Links = Read only).
+// ---------------------------------------------------------------------------
+const FOUNDING_LINK_ID = 'plink_1ULgygLBhUGNbXujmlV8jdvY';
+const FOUNDING_LIMIT = 5;
+let foundingCache: { at: number; data: Record<string, unknown> } | null = null;
+
+export async function foundingStatus(): Promise<Record<string, unknown>> {
+  try {
+    if (foundingCache && Date.now() - foundingCache.at < 60 * 1000) return foundingCache.data;
+    const key = process.env.STRIPE_READ_KEY;
+    if (!key) return { configured: false, limit: FOUNDING_LIMIT };
+    const r = await fetch(`https://api.stripe.com/v1/payment_links/${FOUNDING_LINK_ID}`, {
+      headers: { Authorization: `Bearer ${key}` },
+    });
+    if (!r.ok) return { configured: true, error: `stripe ${r.status}`, limit: FOUNDING_LIMIT };
+    const link: any = await r.json();
+    const limit = Number(link?.restrictions?.completed_sessions?.limit) || FOUNDING_LIMIT;
+    const sold = Number(link?.restrictions?.completed_sessions?.count) || 0;
+    const data = { configured: true, limit, sold, left: Math.max(0, limit - sold), active: Boolean(link?.active) };
+    foundingCache = { at: Date.now(), data };
+    return data;
+  } catch {
+    return { configured: true, error: 'unavailable', limit: FOUNDING_LIMIT };
+  }
+}

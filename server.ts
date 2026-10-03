@@ -2,7 +2,7 @@ import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import 'dotenv/config';
-import { analyzeRoom } from './src/server/analyze.ts';
+import { analyzeRoom, deliverLead, foundingStatus } from './src/server/analyze.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -24,6 +24,19 @@ app.post('/api/analyze-room', async (req, res) => {
     const message = err instanceof Error ? err.message : 'Room analysis failed';
     return res.status(500).json({ error: message });
   }
+});
+
+// Lead delivery to GoHighLevel (see src/server/analyze.ts for secrets)
+app.post('/api/lead', async (req, res) => {
+  const ip = String(req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim();
+  res.json(await deliverLead(req.body, ip));
+});
+
+// Founding-price counter (used by ecentraconcierge.com/kitchen-check)
+app.get('/api/founding', async (_req, res) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Cache-Control', 'no-store');
+  res.json(await foundingStatus());
 });
 
 // Serve production static assets from dist

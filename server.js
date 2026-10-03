@@ -149,6 +149,115 @@ app.post("/api/analyze-room", async (req, res) => {
     return res.status(500).json({ error: message });
   }
 });
+const GHL_API = "https://services.leadconnectorhq.com";
+const GHL_DEFAULT_LOCATION = "8wtMUEAdUnx0Y7nVe93R";
+const leadHits = /* @__PURE__ */ new Map();
+function clip(v, max) {
+  return String(v ?? "").replace(/[\u0000-\u001f]/g, " ").trim().slice(0, max);
+}
+async function ghl(pathname, token, body) {
+  const r = await fetch(GHL_API + pathname, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Version: "2021-07-28",
+      "Content-Type": "application/json",
+      Accept: "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+  const text = await r.text();
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = null;
+  }
+  if (!r.ok) throw new Error(`GHL ${pathname} ${r.status}: ${text.slice(0, 300)}`);
+  return data;
+}
+app.post("/api/lead", async (req, res) => {
+  try {
+    const ip = String(req.headers["x-forwarded-for"] || req.ip || "").split(",")[0].trim();
+    const now = Date.now();
+    const hits = (leadHits.get(ip) || []).filter((t) => now - t < 10 * 60 * 1e3);
+    if (hits.length >= 8) return res.status(200).json({ ok: false, error: "Too many requests. Please try again later." });
+    hits.push(now);
+    leadHits.set(ip, hits);
+    const b = req.body || {};
+    if (b.website) return res.json({ ok: true });
+    const name = clip(b.name, 100);
+    const phone = clip(b.phone, 30);
+    const email = clip(b.email, 120);
+    if (!name || phone.replace(/\D/g, "").length < 10 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(200).json({ ok: false, error: "Please check your name, phone and email." });
+    }
+    const r = b.report || {};
+    const report = [
+      "Kitchen Check request",
+      `Room: ${clip(r.roomType, 60)} | Style: ${clip(r.styleEra, 80)}`,
+      `Modern Score: ${clip(r.score, 5)}/100 (${clip(r.verdict, 60)})`,
+      `Price ballpark: ${clip(r.costRange, 60)} ${clip(r.costNote, 120)}`,
+      `Bottom line: ${clip(r.bottomLine, 400)}`,
+      `Page: ${clip(b.page, 200)}`,
+      "Consent: agreed to be contacted by phone, text or email."
+    ].join("\n");
+    const token = process.env.GHL_PRIVATE_TOKEN;
+    if (!token) {
+      console.warn("[lead] GHL_PRIVATE_TOKEN not set; lead not delivered:", name, email);
+      return res.json({ ok: true, delivered: false });
+    }
+    const locationId = process.env.GHL_LOCATION_ID || GHL_DEFAULT_LOCATION;
+    const parts = name.split(/\s+/);
+    const tag = process.env.LEAD_TAG || "kitchen check demo";
+    const up = await ghl("/contacts/upsert", token, {
+      locationId,
+      name,
+      firstName: parts[0],
+      lastName: parts.slice(1).join(" ") || void 0,
+      email,
+      phone,
+      source: "Kitchen Check",
+      tags: [tag]
+    });
+    const contactId = up?.contact?.id;
+    if (contactId) {
+      try {
+        await ghl(`/contacts/${contactId}/notes`, token, { body: report });
+      } catch (e) {
+        console.warn("[lead] note failed", e);
+      }
+    }
+    return res.json({ ok: true, delivered: Boolean(contactId) });
+  } catch (err) {
+    console.error("[lead] failed", err);
+    return res.status(200).json({ ok: false, error: "Could not send right now." });
+  }
+});
+const FOUNDING_LINK_ID = "plink_1ULgygLBhUGNbXujmlV8jdvY";
+const FOUNDING_LIMIT = 5;
+let foundingCache = null;
+app.get("/api/founding", async (_req, res) => {
+  res.set("Access-Control-Allow-Origin", "*");
+  res.set("Cache-Control", "no-store");
+  try {
+    if (foundingCache && Date.now() - foundingCache.at < 60 * 1e3) return res.json(foundingCache.data);
+    const key = process.env.STRIPE_READ_KEY;
+    if (!key) return res.json({ configured: false, limit: FOUNDING_LIMIT });
+    const r = await fetch(`https://api.stripe.com/v1/payment_links/${FOUNDING_LINK_ID}`, {
+      headers: { Authorization: `Bearer ${key}` }
+    });
+    if (!r.ok) return res.json({ configured: true, error: `stripe ${r.status}`, limit: FOUNDING_LIMIT });
+    const link = await r.json();
+    const limit = Number(link?.restrictions?.completed_sessions?.limit) || FOUNDING_LIMIT;
+    const sold = Number(link?.restrictions?.completed_sessions?.count) || 0;
+    const data = { configured: true, limit, sold, left: Math.max(0, limit - sold), active: Boolean(link?.active) };
+    foundingCache = { at: Date.now(), data };
+    return res.json(data);
+  } catch (err) {
+    return res.json({ configured: true, error: "unavailable", limit: FOUNDING_LIMIT });
+  }
+});
 var distPath = path.join(__dirname, "dist");
 app.use(express.static(distPath));
 app.get("*", (_req, res) => {
