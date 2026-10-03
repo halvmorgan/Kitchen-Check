@@ -31,7 +31,7 @@ export const ECENTRA_BOOKING_URL = 'https://api.leadconnectorhq.com/widget/booki
 type KcOffer = 'a' | 'b';
 const KC_STRIPE: Record<KcOffer, string> = {
   a: 'https://buy.stripe.com/dRmfZi85r3UV5sF6le3VC0w',
-  b: '',
+  b: 'https://buy.stripe.com/7sY4gA5Xj6335sFcJC3VC0A',
 };
 const KC_PRICE: Record<KcOffer, { setup: string; monthly: string }> = {
   a: { setup: '$497 setup', monthly: '+ $297/month' },
@@ -110,6 +110,41 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const goToOffer = () => document.getElementById('kc-offer')?.scrollIntoView({ behavior: 'smooth' });
+
+  // Bathroom mode: getbathcheck.com (any host with "bath") or ?room=bath
+  const [bathMode] = useState<boolean>(() => {
+    try {
+      const q = new URLSearchParams(window.location.search).get('room');
+      return q === 'bath' || /bath/i.test(window.location.hostname);
+    } catch {
+      return false;
+    }
+  });
+
+  // Free demo gate: one free room check per remodeler; owner passcode = unlimited
+  const kcTokenRef = useRef<string | null>(null);
+  if (kcTokenRef.current === null) {
+    try {
+      kcTokenRef.current = sessionStorage.getItem('kc_token') || '';
+    } catch {
+      kcTokenRef.current = '';
+    }
+  }
+  const [gateOpen, setGateOpen] = useState<boolean>(false);
+  const [gateOwnerMode, setGateOwnerMode] = useState<boolean>(false);
+  const [gateForm, setGateForm] = useState({ name: '', company: '', email: '', phone: '', passcode: '' });
+  const [gateError, setGateError] = useState<string | null>(null);
+  const [gateBusy, setGateBusy] = useState<boolean>(false);
+  const pendingPhotoRef = useRef<{ base64: string; mimeType: string; previewUrl: string } | null>(null);
+  const saveKcToken = (t: string) => {
+    kcTokenRef.current = t;
+    try {
+      if (t) sessionStorage.setItem('kc_token', t);
+      else sessionStorage.removeItem('kc_token');
+    } catch {
+      /* ignore */
+    }
+  };
   const handleKcCheckout = () => {
     kcTrack(kcOffer, 'checkout');
     const link = KC_STRIPE[kcOffer];
@@ -173,6 +208,13 @@ export default function App() {
   }, [screen, analysisResult]);
 
   const handleStartAnalysis = async (base64: string, mimeType: string, previewUrl: string) => {
+    if (!kcTokenRef.current) {
+      pendingPhotoRef.current = { base64, mimeType, previewUrl };
+      setIsProcessing(false);
+      setGateError(null);
+      setGateOpen(true);
+      return;
+    }
     setUploadedPhotoUrl(previewUrl);
     setErrorMessage(null);
     setScreen('analyzing');
@@ -186,6 +228,7 @@ export default function App() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          'x-kc-token': kcTokenRef.current || '',
         },
         body: JSON.stringify({
           base64,
@@ -194,6 +237,21 @@ export default function App() {
       });
 
       const data = await response.json();
+
+      if (data.authRequired) {
+        saveKcToken('');
+        pendingPhotoRef.current = { base64, mimeType, previewUrl };
+        setScreen('hero');
+        setGateError(data.error || null);
+        setGateOpen(true);
+        return;
+      }
+      if (data.demoUsed) {
+        setErrorMessage(data.error);
+        setScreen('hero');
+        setTimeout(goToOffer, 300);
+        return;
+      }
 
       if (!response.ok || data.error) {
         throw new Error(data.error || 'Failed to complete room check.');
@@ -455,12 +513,14 @@ export default function App() {
 
             {/* Main Headline */}
             <h1 className="font-display text-4xl sm:text-5xl lg:text-6xl text-[#1E1B18] font-bold tracking-tight leading-[1.15] mb-5">
-              How Dated Is Your Kitchen, Really?
+              {bathMode ? 'How Dated Is Your Bathroom, Really?' : 'How Dated Is Your Kitchen, Really?'}
             </h1>
 
             {/* Paragraph */}
             <p className="text-base sm:text-lg text-[#5E564E] leading-relaxed max-w-2xl mb-8">
-              A free, instant read on how dated your kitchen or bathroom looks, what's working, what buyers may notice, and a remodel price range — no obligation.
+              {bathMode
+                ? "A free, instant read on how dated your bathroom looks, what's working, what buyers may notice, and a remodel price range — no obligation."
+                : "A free, instant read on how dated your kitchen or bathroom looks, what's working, what buyers may notice, and a remodel price range — no obligation."}
             </p>
 
             {/* Upload Button Area */}
@@ -569,7 +629,7 @@ export default function App() {
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                {SAMPLE_ROOMS.filter((s) => !hiddenSamples.has(s.id)).map((sample) => (
+                {(bathMode ? [...SAMPLE_ROOMS].sort((x, y) => (y.id.includes('bath') ? 1 : 0) - (x.id.includes('bath') ? 1 : 0)) : SAMPLE_ROOMS).filter((s) => !hiddenSamples.has(s.id)).map((sample) => (
                   <button
                     key={sample.id}
                     type="button"
@@ -1019,12 +1079,87 @@ export default function App() {
         )}
       </main>
 
+      {/* Free demo gate */}
+      {gateOpen && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center px-4" role="dialog" aria-modal="true">
+          <form
+            onSubmit={async (e) => {
+              e.preventDefault();
+              if (gateBusy) return;
+              setGateBusy(true);
+              setGateError(null);
+              try {
+                const url = gateOwnerMode ? '/api/owner-access' : '/api/demo-request';
+                const payload = gateOwnerMode
+                  ? { passcode: gateForm.passcode }
+                  : { name: gateForm.name, company: gateForm.company, email: gateForm.email, phone: gateForm.phone, offer: kcOffer };
+                const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                const data = await res.json().catch(() => ({}));
+                if (data.ok && data.token) {
+                  saveKcToken(data.token);
+                  setGateOpen(false);
+                  setGateForm({ ...gateForm, passcode: '' });
+                  const p = pendingPhotoRef.current;
+                  pendingPhotoRef.current = null;
+                  if (p) handleStartAnalysis(p.base64, p.mimeType, p.previewUrl);
+                } else {
+                  setGateError(data.error || 'Could not start your demo. Please try again.');
+                  if (data.demoUsed) {
+                    setGateOpen(false);
+                    setErrorMessage(data.error);
+                    setTimeout(goToOffer, 300);
+                  }
+                }
+              } catch {
+                setGateError('Could not reach the server. Please try again.');
+              } finally {
+                setGateBusy(false);
+              }
+            }}
+            className="w-full max-w-md bg-white rounded-2xl p-6 sm:p-7 shadow-2xl text-left"
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wider text-[#B8683D]">For remodelers</p>
+                <h2 className="mt-1 text-xl font-display font-bold text-[#1E1B18]">
+                  {gateOwnerMode ? 'Owner access' : 'Get your free room check'}
+                </h2>
+              </div>
+              <button type="button" onClick={() => setGateOpen(false)} className="cursor-pointer text-2xl leading-none text-[#857B72] hover:text-[#1E1B18]" aria-label="Close">×</button>
+            </div>
+            {!gateOwnerMode ? (
+              <>
+                <p className="mt-2 text-sm text-[#5E564E]">This demo is for remodeling companies. Tell us who you are and run 1 free room check right now.</p>
+                <div className="mt-4 grid gap-2.5">
+                  <input required maxLength={80} value={gateForm.name} onChange={(e) => setGateForm({ ...gateForm, name: e.target.value })} placeholder="Your name" className="rounded-lg border border-[#DDD4C7] px-3 py-2.5 text-sm focus:outline-none focus:border-[#B8683D]" />
+                  <input required maxLength={120} value={gateForm.company} onChange={(e) => setGateForm({ ...gateForm, company: e.target.value })} placeholder="Company name" className="rounded-lg border border-[#DDD4C7] px-3 py-2.5 text-sm focus:outline-none focus:border-[#B8683D]" />
+                  <input required type="email" maxLength={160} value={gateForm.email} onChange={(e) => setGateForm({ ...gateForm, email: e.target.value })} placeholder="Email" className="rounded-lg border border-[#DDD4C7] px-3 py-2.5 text-sm focus:outline-none focus:border-[#B8683D]" />
+                  <input type="tel" maxLength={40} value={gateForm.phone} onChange={(e) => setGateForm({ ...gateForm, phone: e.target.value })} placeholder="Phone (optional)" className="rounded-lg border border-[#DDD4C7] px-3 py-2.5 text-sm focus:outline-none focus:border-[#B8683D]" />
+                </div>
+                <p className="mt-2 text-[11px] text-[#877E75]">By starting the demo you agree Ecentra Concierge may contact you about Kitchen Check. Photos are used only to make your report and are not stored.</p>
+              </>
+            ) : (
+              <div className="mt-4">
+                <input type="password" autoComplete="off" value={gateForm.passcode} onChange={(e) => setGateForm({ ...gateForm, passcode: e.target.value })} placeholder="Owner code" className="w-full rounded-lg border border-[#DDD4C7] px-3 py-2.5 text-sm focus:outline-none focus:border-[#B8683D]" />
+              </div>
+            )}
+            {gateError && <p className="mt-3 text-sm text-red-700">{gateError}</p>}
+            <button type="submit" disabled={gateBusy} className="cursor-pointer mt-4 w-full rounded-xl bg-[#B8683D] hover:bg-[#A3582E] disabled:opacity-50 py-3 font-semibold text-white">
+              {gateBusy ? 'One moment...' : gateOwnerMode ? 'Enter' : 'Run my free room check'}
+            </button>
+            <button type="button" onClick={() => { setGateOwnerMode(!gateOwnerMode); setGateError(null); }} className="cursor-pointer mt-3 w-full text-xs text-[#857B72] hover:text-[#B8683D]">
+              {gateOwnerMode ? 'Back to the free demo' : 'Have an owner code?'}
+            </button>
+          </form>
+        </div>
+      )}
+
       {/* Remodeler offer (split test A/B) */}
       <section id="kc-offer" className="bg-[#181513] text-[#FAF8F5]">
         <div className="max-w-3xl mx-auto px-4 sm:px-6 py-12">
-          <p className="text-[#E59866] text-xs font-semibold uppercase tracking-wider">For kitchen and bath remodelers · Founding offer</p>
+          <p className="text-[#E59866] text-xs font-semibold uppercase tracking-wider">{bathMode ? 'For bathroom remodelers' : 'For kitchen and bath remodelers'} · Founding offer</p>
           <h2 className="mt-2 text-2xl sm:text-3xl font-display font-bold leading-tight">
-            Put Kitchen Check on your website and turn visitors into in-home design consults.
+            {bathMode ? 'Put Bath Check on your website and turn visitors into bathroom remodel consults.' : 'Put Kitchen Check on your website and turn visitors into in-home design consults.'}
           </h2>
           <p className="mt-3 text-[#C8C2BA]">
             Homeowners upload a photo of their kitchen or bathroom, get an instant read on how dated it looks with your price ranges, then ask you for a consult. Done for you, with your name on it.

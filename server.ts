@@ -2,7 +2,7 @@ import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import 'dotenv/config';
-import { analyzeRoom, deliverLead, foundingStatus } from './src/server/analyze.ts';
+import { analyzeRoom, deliverLead, foundingStatus, requestDemo, ownerAccess, claimRoomCheck } from './src/server/analyze.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -12,17 +12,32 @@ const port = parseInt(process.env.PORT || '3000', 10);
 
 app.use(express.json({ limit: '30mb' }));
 
+const clientIp = (req: express.Request) => String(req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim();
+
+// Free demo: name + company + email -> one room check
+app.post('/api/demo-request', async (req, res) => {
+  res.json(await requestDemo(req.body, clientIp(req)));
+});
+// Owner passcode -> unlimited demos
+app.post('/api/owner-access', async (req, res) => {
+  res.json(await ownerAccess(req.body, clientIp(req)));
+});
+
+// Errors are sent as 200 + { error } because the AI Studio preview replaces error pages.
 app.post('/api/analyze-room', async (req, res) => {
+  const { base64, mimeType } = req.body || {};
+  if (!base64) {
+    return res.json({ error: 'No image data provided' });
+  }
+  const claim = await claimRoomCheck(String(req.headers['x-kc-token'] || ''));
+  if (!claim.ok) return res.json(claim);
   try {
-    const { base64, mimeType } = req.body;
-    if (!base64) {
-      return res.status(400).json({ error: 'No image data provided' });
-    }
     const result = await analyzeRoom(base64, mimeType);
     return res.json(result);
   } catch (err: unknown) {
+    await claim.refund();
     const message = err instanceof Error ? err.message : 'Room analysis failed';
-    return res.status(500).json({ error: message });
+    return res.json({ error: message });
   }
 });
 

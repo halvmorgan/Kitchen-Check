@@ -1,5 +1,7 @@
 import { GoogleGenAI } from "@google/genai";
 import "dotenv/config";
+import crypto from "crypto";
+import { Firestore } from "@google-cloud/firestore";
 
 export interface Finding {
   title: string;
@@ -285,5 +287,134 @@ export async function foundingStatus(): Promise<Record<string, unknown>> {
     return data;
   } catch {
     return { configured: true, error: 'unavailable', limit: FOUNDING_LIMIT };
+  }
+}
+
+
+// ======================================================================
+// Free demo gate: each remodeler gets ONE free room check (name + company + email).
+// The owner passcode (APP_ACCESS_PASSCODE secret) gets unlimited demos (50/day).
+// Stored in Firestore database "default": kc_tokens (by token hash) and kc_leads (by email hash).
+// ======================================================================
+const KC_TOKENS = 'kc_tokens';
+const KC_LEADS = 'kc_leads';
+const DEMO_TTL_MS = 48 * 60 * 60 * 1000;
+const OWNER_TTL_MS = 12 * 60 * 60 * 1000;
+const OWNER_DAILY = 50;
+let _kcdb: Firestore | null = null;
+const kcdb = () => (_kcdb ??= new Firestore({ databaseId: process.env.FIRESTORE_DATABASE_ID || 'default', ignoreUndefinedProperties: true }));
+const sha = (s: string) => crypto.createHash('sha256').update(s, 'utf8').digest('hex');
+const today = () => new Date().toISOString().slice(0, 10);
+const demoIpHits = new Map<string, { count: number; day: string }>();
+const ownerTries = new Map<string, { count: number; first: number }>();
+const str = (x: unknown, max: number) => (typeof x === 'string' ? x.trim().slice(0, max) : '');
+const USED = 'You have already used your free room check. See the founding offer below, or contact Ecentra Concierge.';
+
+type TokenDoc = { role: 'demo' | 'owner'; uses: number; maxUses: number; expiresAt: number; day?: string; email?: string };
+
+const newToken = async (doc: TokenDoc) => {
+  const token = crypto.randomBytes(32).toString('hex');
+  await kcdb().collection(KC_TOKENS).doc(sha(token)).set({ ...doc, createdAt: Date.now() });
+  return token;
+};
+
+export async function requestDemo(body: any, ip: string): Promise<Record<string, unknown>> {
+  const name = str(body?.name, 80);
+  const company = str(body?.company, 120);
+  const email = str(body?.email, 160).toLowerCase();
+  const phone = str(body?.phone, 40);
+  const offer = body?.offer === 'b' ? 'b' : 'a';
+  if (!name || !company) return { ok: false, error: 'Please enter your name and company.' };
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) return { ok: false, error: 'Please enter a valid email address.' };
+  const hit = demoIpHits.get(ip);
+  if (hit && hit.day === today() && hit.count >= 3) {
+    return { ok: false, error: 'Too many demo requests from this connection today. Please try again tomorrow.' };
+  }
+  try {
+    const leadRef = kcdb().collection(KC_LEADS).doc(sha(email));
+    const lead = await leadRef.get();
+    if (lead.exists) {
+      const prev = lead.data() as { tokenHash?: string };
+      if (prev.tokenHash) {
+        const t = await kcdb().collection(KC_TOKENS).doc(prev.tokenHash).get();
+        const td = t.data() as TokenDoc | undefined;
+        if (td && td.uses >= td.maxUses) return { ok: false, demoUsed: true, error: USED };
+        if (t.exists) await t.ref.update({ maxUses: 0 }); // retire the old unused token
+      }
+    }
+    const token = await newToken({ role: 'demo', uses: 0, maxUses: 1, expiresAt: Date.now() + DEMO_TTL_MS, email });
+    await leadRef.set(
+      { name, company, email, phone, offer, tokenHash: sha(token), createdAt: lead.exists ? (lead.data() as any).createdAt : Date.now(), lastRequestAt: Date.now(), ip },
+      { merge: true }
+    );
+    demoIpHits.set(ip, { count: (hit && hit.day === today() ? hit.count : 0) + 1, day: today() });
+    return { ok: true, token, role: 'demo' };
+  } catch (e: unknown) {
+    console.error('[kc demo] request failed:', (e as Error)?.message);
+    return { ok: false, error: 'Free demos are not available right now. Please try again later.' };
+  }
+}
+
+export async function ownerAccess(body: any, ip: string): Promise<Record<string, unknown>> {
+  const expected = (process.env.APP_ACCESS_PASSCODE || '').trim();
+  if (!expected) return { ok: false, error: 'Owner access is not set up.' };
+  const now = Date.now();
+  const a = ownerTries.get(ip);
+  if (a && now - a.first < 15 * 60 * 1000 && a.count >= 10) return { ok: false, error: 'Too many tries. Please wait 15 minutes.' };
+  const given = str(body?.passcode, 200);
+  const ok = given.length > 0 && crypto.timingSafeEqual(Buffer.from(sha(given)), Buffer.from(sha(expected)));
+  if (!ok) {
+    if (!a || now - a.first >= 15 * 60 * 1000) ownerTries.set(ip, { count: 1, first: now });
+    else a.count++;
+    return { ok: false, error: 'Incorrect code.' };
+  }
+  ownerTries.delete(ip);
+  try {
+    const token = await newToken({ role: 'owner', uses: 0, maxUses: OWNER_DAILY, expiresAt: now + OWNER_TTL_MS, day: today() });
+    return { ok: true, token, role: 'owner' };
+  } catch (e: unknown) {
+    console.error('[kc owner] failed:', (e as Error)?.message);
+    return { ok: false, error: 'Not available right now. Please try again later.' };
+  }
+}
+
+// Use up one room check before analyzing. Returns refund() to give it back if the analysis fails.
+export async function claimRoomCheck(token: string): Promise<{ ok: true; refund: () => Promise<void> } | { ok: false; [k: string]: unknown }> {
+  if (!token || !/^[a-f0-9]{64}$/.test(token)) return { ok: false, authRequired: true, error: 'Please start your free demo first.' };
+  const ref = kcdb().collection(KC_TOKENS).doc(sha(token));
+  try {
+    const result = await kcdb().runTransaction(async (t) => {
+      const snap = await t.get(ref);
+      if (!snap.exists) return { ok: false, authRequired: true, error: 'Please start your free demo first.' };
+      const d = snap.data() as TokenDoc;
+      if (Date.now() > d.expiresAt) return { ok: false, authRequired: true, error: 'Your demo access has expired. Please start again.' };
+      let uses = d.uses || 0;
+      if (d.role === 'owner' && d.day !== today()) uses = 0;
+      if (uses >= d.maxUses) {
+        return d.role === 'owner'
+          ? { ok: false, error: 'Daily limit reached. Please try again tomorrow.' }
+          : { ok: false, demoUsed: true, error: USED };
+      }
+      t.update(ref, { uses: uses + 1, day: today(), lastUsedAt: Date.now() });
+      return { ok: true };
+    });
+    if (!result.ok) return result as { ok: false };
+    return {
+      ok: true,
+      refund: async () => {
+        try {
+          await kcdb().runTransaction(async (t) => {
+            const s = await t.get(ref);
+            const d = s.data() as TokenDoc | undefined;
+            if (d && d.uses > 0) t.update(ref, { uses: d.uses - 1 });
+          });
+        } catch (e: unknown) {
+          console.error('[kc demo] refund failed:', (e as Error)?.message);
+        }
+      },
+    };
+  } catch (e: unknown) {
+    console.error('[kc demo] claim failed:', (e as Error)?.message);
+    return { ok: false, error: 'The room check is not available right now. Please try again later.' };
   }
 }

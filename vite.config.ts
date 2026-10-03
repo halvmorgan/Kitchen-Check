@@ -2,7 +2,7 @@ import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
 import { defineConfig, Plugin } from 'vite';
-import { analyzeRoom, deliverLead, foundingStatus } from './src/server/analyze.ts';
+import { analyzeRoom, deliverLead, foundingStatus, requestDemo, ownerAccess, claimRoomCheck } from './src/server/analyze.ts';
 
 function roomAnalysisDevPlugin(): Plugin {
   return {
@@ -17,6 +17,20 @@ function roomAnalysisDevPlugin(): Plugin {
             try { body = JSON.parse(Buffer.concat(chunks).toString('utf-8') || '{}'); } catch { body = {}; }
             const ip = String(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').split(',')[0].trim();
             const result = await deliverLead(body, ip);
+            res.statusCode = 200;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify(result));
+          });
+          return;
+        }
+        if ((req.url === '/api/demo-request' || req.url === '/api/owner-access') && req.method === 'POST') {
+          const chunks: Buffer[] = [];
+          req.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+          req.on('end', async () => {
+            let body: any = {};
+            try { body = JSON.parse(Buffer.concat(chunks).toString('utf-8') || '{}'); } catch { body = {}; }
+            const ip = String(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').split(',')[0].trim();
+            const result = req.url === '/api/demo-request' ? await requestDemo(body, ip) : await ownerAccess(body, ip);
             res.statusCode = 200;
             res.setHeader('Content-Type', 'application/json');
             res.end(JSON.stringify(result));
@@ -39,19 +53,27 @@ function roomAnalysisDevPlugin(): Plugin {
             try {
               const bodyStr = Buffer.concat(chunks).toString('utf-8');
               const { base64, mimeType } = JSON.parse(bodyStr);
+              res.setHeader('Content-Type', 'application/json');
+              res.statusCode = 200;
               if (!base64) {
-                res.statusCode = 400;
-                res.setHeader('Content-Type', 'application/json');
                 res.end(JSON.stringify({ error: 'No image data provided' }));
                 return;
               }
-              const result = await analyzeRoom(base64, mimeType);
-              res.statusCode = 200;
-              res.setHeader('Content-Type', 'application/json');
-              res.end(JSON.stringify(result));
+              const claim = await claimRoomCheck(String(req.headers['x-kc-token'] || ''));
+              if (!claim.ok) {
+                res.end(JSON.stringify(claim));
+                return;
+              }
+              try {
+                const result = await analyzeRoom(base64, mimeType);
+                res.end(JSON.stringify(result));
+              } catch (e: unknown) {
+                await claim.refund();
+                throw e;
+              }
             } catch (err: unknown) {
               const message = err instanceof Error ? err.message : 'Room analysis failed';
-              res.statusCode = 500;
+              res.statusCode = 200;
               res.setHeader('Content-Type', 'application/json');
               res.end(JSON.stringify({ error: message }));
             }
