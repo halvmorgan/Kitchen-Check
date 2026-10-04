@@ -33,9 +33,9 @@ const KC_STRIPE: Record<KcOffer, string> = {
   a: 'https://buy.stripe.com/dRmfZi85r3UV5sF6le3VC0w',
   b: 'https://buy.stripe.com/7sY4gA5Xj6335sFcJC3VC0A',
 };
-const KC_PRICE: Record<KcOffer, { setup: string; monthly: string }> = {
-  a: { setup: '$497 setup', monthly: '+ $297/month' },
-  b: { setup: '$497 setup', monthly: '+ $97/month' },
+const KC_PRICE: Record<KcOffer, { setup: string; monthly: string; mo: string; regular: string }> = {
+  a: { setup: '$497 setup', monthly: '+ $297/month', mo: '$297', regular: '$997 setup + $397/month' },
+  b: { setup: '$497 setup', monthly: '+ $97/month', mo: '$97', regular: '$997 setup + $197/month' },
 };
 const KC_INCLUDES = [
   'Your own Kitchen Check with your name, logo, colors and service area',
@@ -1096,7 +1096,7 @@ export default function App() {
             </h2>
 
             <p className="text-base text-[#5E564E] leading-relaxed mb-8 max-w-xl mx-auto">
-              Want this on your website, branded to your business? Founding price: {KC_PRICE[kcOffer].setup} {KC_PRICE[kcOffer].monthly}, for the first 5 remodelers.
+              Want this on your website, branded to your business? Founding price: {KC_PRICE[kcOffer].setup} {KC_PRICE[kcOffer].monthly} (regular {KC_PRICE[kcOffer].regular}), for the first 5 remodelers only.
             </p>
 
             {/* Large Book Setup Call Button */}
@@ -1236,7 +1236,8 @@ export default function App() {
               <span className="text-4xl font-bold">{KC_PRICE[kcOffer].setup}</span>
               <span className="text-lg font-semibold text-[#5E564E]">{KC_PRICE[kcOffer].monthly}</span>
             </div>
-            <p className="mt-1 text-sm text-[#857B72]">Founding price for the first 5 remodelers (normally $997 setup). Cancel the monthly anytime.</p>
+            <p className="mt-1 text-sm text-[#857B72]">Regular price: {KC_PRICE[kcOffer].regular}</p>
+            <p className="mt-1 text-sm font-semibold text-[#24211E]">Founding price: your {KC_PRICE[kcOffer].mo}/month is locked in for as long as you stay. Cancel anytime.</p>
             <ul className="mt-5 space-y-2">
               {KC_INCLUDES.map((x, i) => (
                 <li key={i} className="flex gap-2 text-sm sm:text-base">
@@ -1252,6 +1253,9 @@ export default function App() {
             >
               Claim a founding spot
             </button>
+            <p className="mt-3 rounded-lg bg-amber-50 border border-amber-300 px-3 py-2 text-center text-sm font-semibold text-amber-900">
+              Founding price is limited to the first 5 remodelers. After that it goes to {KC_PRICE[kcOffer].regular}.
+            </p>
             <p className="mt-3 text-center text-sm">
               <a href={ECENTRA_BOOKING_URL} target="_blank" rel="noopener noreferrer" className="text-[#B8683D] font-medium hover:underline">
                 Questions first? Book a 15-minute call
