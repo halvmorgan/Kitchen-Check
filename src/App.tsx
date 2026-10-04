@@ -143,6 +143,30 @@ export default function App() {
   const [gateError, setGateError] = useState<string | null>(null);
   const [gateBusy, setGateBusy] = useState<boolean>(false);
   const pendingPhotoRef = useRef<{ base64: string; mimeType: string; previewUrl: string } | null>(null);
+  // Remember on this device that the free room check was used (survives closing the browser)
+  const deviceUsed = () => {
+    try {
+      return localStorage.getItem('kc_device_used') === '1';
+    } catch {
+      return false;
+    }
+  };
+  const markDeviceUsed = () => {
+    try {
+      localStorage.setItem('kc_device_used', '1');
+    } catch {
+      /* ignore */
+    }
+  };
+  const kcRoleRef = useRef<string>('');
+  if (!kcRoleRef.current) {
+    try {
+      kcRoleRef.current = sessionStorage.getItem('kc_role') || '';
+    } catch {
+      /* ignore */
+    }
+  }
+
   const saveKcToken = (t: string) => {
     kcTokenRef.current = t;
     try {
@@ -215,6 +239,13 @@ export default function App() {
   }, [screen, analysisResult]);
 
   const handleStartAnalysis = async (base64: string, mimeType: string, previewUrl: string) => {
+    if (!kcTokenRef.current && deviceUsed()) {
+      setIsProcessing(false);
+      setErrorMessage('You have already used your free room check. See the founding offer below, or contact Ecentra Concierge.');
+      setScreen('hero');
+      setTimeout(() => window.scrollTo({ top: 0, behavior: 'smooth' }), 50);
+      return;
+    }
     if (!kcTokenRef.current) {
       pendingPhotoRef.current = { base64, mimeType, previewUrl };
       setIsProcessing(false);
@@ -254,9 +285,10 @@ export default function App() {
         return;
       }
       if (data.demoUsed) {
+        markDeviceUsed();
         setErrorMessage(data.error);
         setScreen('hero');
-        setTimeout(goToOffer, 300);
+        setTimeout(() => window.scrollTo({ top: 0, behavior: 'smooth' }), 50);
         return;
       }
 
@@ -266,6 +298,7 @@ export default function App() {
 
       setAnalysisResult(data);
       setScreen('report');
+      if (kcRoleRef.current === 'demo') markDeviceUsed();
       kcTrack(kcOffer, 'demo');
     } catch (err: unknown) {
       const msg =
@@ -502,11 +535,30 @@ export default function App() {
                 <div className="flex items-start gap-3">
                   <AlertTriangle className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
                   <div className="space-y-1">
-                    <p className="text-sm font-semibold text-red-900">Room Analysis Notice</p>
+                    <p className="text-sm font-semibold text-red-900">{/already used/i.test(errorMessage) ? 'Your free room check has been used' : 'Room Analysis Notice'}</p>
                     <p className="text-sm text-red-700">{errorMessage}</p>
-                    <p className="text-xs font-medium text-red-800 pt-1">
-                      Tap the button and try again.
-                    </p>
+                    {/already used/i.test(errorMessage) ? (
+                      <button
+                        type="button"
+                        onClick={goToOffer}
+                        className="cursor-pointer mt-2 inline-flex items-center gap-1.5 rounded-lg bg-[#B8683D] hover:bg-[#A3582E] px-4 py-2 text-sm font-semibold text-white"
+                      >
+                        See the founding offer <ArrowRight className="w-4 h-4" />
+                      </button>
+                    ) : null}
+                    {/already used/i.test(errorMessage) ? (
+                      <button
+                        type="button"
+                        onClick={() => { setGateOwnerMode(true); setGateError(null); setGateOpen(true); }}
+                        className="cursor-pointer block mt-2 text-xs text-red-800 underline"
+                      >
+                        Have an owner code?
+                      </button>
+                    ) : (
+                      <p className="text-xs font-medium text-red-800 pt-1">
+                        Tap the button and try again.
+                      </p>
+                    )}
                   </div>
                 </div>
               </div>
@@ -868,8 +920,8 @@ export default function App() {
 
             {/* Dark Bottom Line Section */}
             <div className="bg-[#181513] text-[#FAF8F5] rounded-2xl p-6 sm:p-8 shadow-xl border border-[#2B2724]">
-              <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
-                <div className="space-y-2 max-w-xl">
+              <div className="flex flex-col gap-5">
+                <div className="space-y-2 w-full">
                   <div className="inline-flex items-center gap-1.5 text-xs text-[#D97D4B] font-semibold uppercase tracking-wider">
                     <FileCheck2 className="w-3.5 h-3.5 text-[#B8683D]" />
                     <span>The Bottom Line</span>
@@ -882,7 +934,7 @@ export default function App() {
                   </p>
                 </div>
 
-                <div className="bg-[#24201D] border border-[#3A332E] rounded-xl p-5 text-center shrink-0 min-w-[240px]">
+                <div className="w-full bg-[#24201D] border border-[#3A332E] rounded-xl p-5 text-center">
                   <span className="text-[11px] uppercase tracking-wider text-[#A69D92] font-medium block mb-1">
                     Remodel Price Ballpark
                   </span>
@@ -1104,6 +1156,12 @@ export default function App() {
                 const data = await res.json().catch(() => ({}));
                 if (data.ok && data.token) {
                   saveKcToken(data.token);
+                  kcRoleRef.current = data.role || '';
+                  try {
+                    sessionStorage.setItem('kc_role', data.role || '');
+                  } catch {
+                    /* ignore */
+                  }
                   setGateOpen(false);
                   setGateForm({ ...gateForm, passcode: '' });
                   const p = pendingPhotoRef.current;
@@ -1112,9 +1170,11 @@ export default function App() {
                 } else {
                   setGateError(data.error || 'Could not start your demo. Please try again.');
                   if (data.demoUsed) {
+                    markDeviceUsed();
                     setGateOpen(false);
                     setErrorMessage(data.error);
-                    setTimeout(goToOffer, 300);
+                    setScreen('hero');
+                    setTimeout(() => window.scrollTo({ top: 0, behavior: 'smooth' }), 50);
                   }
                 }
               } catch {
