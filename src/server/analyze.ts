@@ -355,7 +355,40 @@ export async function requestDemo(body: any, ip: string): Promise<Record<string,
   }
 }
 
+// Kitchen Check codes (KC-XXXXXX) are created in Harold's owner panel on getseeitfinished.com (Firestore kc_codes).
+async function redeemKcCode(code: string, ip: string): Promise<Record<string, unknown>> {
+  const now = Date.now();
+  const a = ownerTries.get(ip);
+  if (a && now - a.first < 15 * 60 * 1000 && a.count >= 10) return { ok: false, error: 'Too many tries. Please wait 15 minutes.' };
+  const fail = (error: string) => {
+    if (!a || now - a.first >= 15 * 60 * 1000) ownerTries.set(ip, { count: 1, first: now });
+    else a.count++;
+    return { ok: false, error };
+  };
+  try {
+    const ref = kcdb().collection('kc_codes').doc(code);
+    const result = await kcdb().runTransaction(async (t) => {
+      const snap = await t.get(ref);
+      if (!snap.exists) return { error: 'Incorrect code.' };
+      const d = snap.data() as { expiresAt: number; maxUses?: number; redeemed?: boolean };
+      if (d.redeemed) return { error: 'This code has already been used. Please contact Ecentra Concierge for a new one.' };
+      if (now > d.expiresAt) return { error: 'This code has expired. Please contact Ecentra Concierge for a new one.' };
+      t.update(ref, { redeemed: true, redeemedAt: now });
+      return { maxUses: Math.max(1, Math.min(10, d.maxUses || 1)) };
+    });
+    if ('error' in result) return fail(result.error as string);
+    ownerTries.delete(ip);
+    const token = await newToken({ role: 'demo', uses: 0, maxUses: result.maxUses as number, expiresAt: now + DEMO_TTL_MS });
+    return { ok: true, token, role: 'demo' };
+  } catch (e: unknown) {
+    console.error('[kc code] redeem failed:', (e as Error)?.message);
+    return { ok: false, error: 'Codes are not available right now. Please try again later.' };
+  }
+}
+
 export async function ownerAccess(body: any, ip: string): Promise<Record<string, unknown>> {
+  const codeIn = str(body?.passcode, 40).toUpperCase().replace(/\s+/g, '');
+  if (/^KC-[A-Z0-9]{6}$/.test(codeIn)) return redeemKcCode(codeIn, ip);
   const expected = (process.env.APP_ACCESS_PASSCODE || '').trim();
   if (!expected) return { ok: false, error: 'Owner access is not set up.' };
   const now = Date.now();

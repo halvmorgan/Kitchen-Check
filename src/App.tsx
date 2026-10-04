@@ -552,7 +552,7 @@ export default function App() {
                         onClick={() => { setGateOwnerMode(true); setGateError(null); setGateOpen(true); }}
                         className="cursor-pointer block mt-2 text-xs text-red-800 underline"
                       >
-                        Have an owner code?
+                        Have a code?
                       </button>
                     ) : (
                       <p className="text-xs font-medium text-red-800 pt-1">
@@ -1189,7 +1189,7 @@ export default function App() {
               <div>
                 <p className="text-xs font-semibold uppercase tracking-wider text-[#B8683D]">For remodelers</p>
                 <h2 className="mt-1 text-xl font-display font-bold text-[#1E1B18]">
-                  {gateOwnerMode ? 'Owner access' : 'Get your free room check'}
+                  {gateOwnerMode ? 'Enter your code' : 'Get your free room check'}
                 </h2>
               </div>
               <button type="button" onClick={() => setGateOpen(false)} className="cursor-pointer text-2xl leading-none text-[#857B72] hover:text-[#1E1B18]" aria-label="Close">×</button>
@@ -1207,7 +1207,7 @@ export default function App() {
               </>
             ) : (
               <div className="mt-4">
-                <input type="password" autoComplete="off" value={gateForm.passcode} onChange={(e) => setGateForm({ ...gateForm, passcode: e.target.value })} placeholder="Owner code" className="w-full rounded-lg border border-[#DDD4C7] px-3 py-2.5 text-sm focus:outline-none focus:border-[#B8683D]" />
+                <input type="password" autoComplete="off" value={gateForm.passcode} onChange={(e) => setGateForm({ ...gateForm, passcode: e.target.value })} placeholder="Your code (for example KC-ABC123)" className="w-full rounded-lg border border-[#DDD4C7] px-3 py-2.5 text-sm focus:outline-none focus:border-[#B8683D]" />
               </div>
             )}
             {gateError && <p className="mt-3 text-sm text-red-700">{gateError}</p>}
@@ -1215,7 +1215,7 @@ export default function App() {
               {gateBusy ? 'One moment...' : gateOwnerMode ? 'Enter' : 'Run my free room check'}
             </button>
             <button type="button" onClick={() => { setGateOwnerMode(!gateOwnerMode); setGateError(null); }} className="cursor-pointer mt-3 w-full text-xs text-[#857B72] hover:text-[#B8683D]">
-              {gateOwnerMode ? 'Back to the free demo' : 'Have an owner code?'}
+              {gateOwnerMode ? 'Back to the free demo' : 'Have a code?'}
             </button>
           </form>
         </div>
